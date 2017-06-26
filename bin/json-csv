@@ -15,7 +15,7 @@ require 'optparse'
 require 'json'
 
 class JsonCsv
-  VERSION = "0.5.0"
+  VERSION = "0.5.1"
   VERSION_DATE = "2017-06-25"
 
   DEFAULT_OPTS = {
