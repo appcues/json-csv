@@ -13,12 +13,12 @@ You can install json-csv as a Ruby Gem:
 Or as a standalone command-line script:
 
     # Systemwide install
-    sudo curl https://raw.githubusercontent.com/appcues/json-csv/master/lib/json_csv.rb > /usr/local/bin/json-csv
+    curl https://raw.githubusercontent.com/appcues/json-csv/master/lib/json_csv.rb | sudo tee /usr/local/bin/json-csv >/dev/null
     sudo chmod a+x /usr/local/bin/json-csv
 
     # Single-user install
     curl https://raw.githubusercontent.com/appcues/json-csv/master/lib/json_csv.rb > json-csv
-    chmod a+x json-csv
+    chmod +x json-csv
 
 Run `json-csv -h` to see execution options.
 
