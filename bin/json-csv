@@ -15,7 +15,7 @@ require 'optparse'
 require 'json'
 
 class JsonCsv
-  VERSION = "0.5.1"
+  VERSION = "0.5.2"
   VERSION_DATE = "2017-06-25"
 
   DEFAULT_OPTS = {
@@ -29,13 +29,13 @@ class JsonCsv
   }
 
   class << self
-    def new_from_argv(argv)
+    def parse_argv(argv)
       opts = DEFAULT_OPTS
 
-      OptionParser.new do |op|
+      argv = OptionParser.new do |op|
         op.banner = <<-EOT
-      Converts JSON to CSV, and vice versa.
-      Usage: #{$0} [options] [--] [input-file [output-file]]
+Converts JSON to CSV, and vice versa.
+Usage: #{$0} [options] [--] [input-file [output-file]]
         EOT
 
         op.on("-i input-file", "--input input-file", "Input file (default STDIN)") do |input_file|
@@ -52,7 +52,6 @@ class JsonCsv
 
         op.on("-d depth", "--depth depth", "Maximum depth of JSON-to-CSV conversion (default -1, unlimited)") do |depth|
           opts[:depth] = depth.to_i
-          opts[:depth] += 1 if opts[:depth] > 0  # this is a fudge to use -1 as infinity
         end
 
         op.on("-e crlf|cr|lf", "--line-ending crlf|cr|lf", "Line endings for output file (default crlf).") do |ending|
@@ -78,12 +77,16 @@ class JsonCsv
           exit
         end
 
-      end.parse!(argv)
-
+      end.parse(argv)
 
       opts[:input_file] = argv.shift if argv.count > 0
       opts[:output_file] = argv.shift if argv.count > 0
 
+      opts
+    end
+
+    def new_from_argv(argv)
+      opts = parse_argv(argv)
       self.new(opts)
     end
 
@@ -96,10 +99,14 @@ class JsonCsv
     end
   end
 
+
   def initialize(opts)
     @opts = DEFAULT_OPTS.merge(opts)
   end
 
+
+  # Performs the JSON-to-CSV or CSV-to-JSON conversion, as specified in
+  # `opts` and the options passed in during `JsonCsv.new`.
   def run(opts = {})
     opts = @opts.merge(opts)
     enc = opts[:source_encoding]
@@ -112,6 +119,7 @@ class JsonCsv
       exit 1
     end
   end
+
 
   def convert_json_to_csv(opts = {})
     opts = @opts.merge(opts)
@@ -133,7 +141,9 @@ class JsonCsv
     end
 
     debug(opts, "Getting headers from JSON data.")
-    headers = get_headers_from_json(input_fh, tmp_fh, opts[:depth])
+    depth = opts[:depth]
+    depth += 1 if depth > 0  # a fudge, in order to use -1 as infinity
+    headers = get_headers_from_json(input_fh, tmp_fh, depth)
 
     input_fh.close
     tmp_fh.close if tmp_fh
@@ -150,7 +160,7 @@ class JsonCsv
     end
 
     debug(opts, "Writing CSV output.")
-    output_csv(headers, data_fh, output_fh)
+    output_csv(headers, data_fh, output_fh, opts[:line_ending])
     data_fh.close
     output_fh.close
 
@@ -169,6 +179,10 @@ private
     STDERR.puts("#{Time.now}\t#{msg}") if opts[:debug]
   end
 
+
+
+  # Scans a JSON file at `input_fh` to determine the headers
+  # to use when writing CSV data.
   # Returns a hash of `'header' => index` pairs, sorted.
   def get_headers_from_json(input_fh, tmp_fh, depth)
     headers = {}
@@ -182,6 +196,7 @@ private
     sort_keys(headers)
   end
 
+  # Helper function to get_headers_from_json --
   # Sorts a hash with string keys by number of dots in the string,
   # then alphabetically.
   # Returns a hash of `'key' => index` pairs, in order of index.
@@ -197,22 +212,31 @@ private
     sorted
   end
 
+  # Helper function to sort_keys --
+  # Counts the number of dots in a string.
   def count_dots(str)
     str.chars.select{|c| c == "."}.count
   end
 
-  def flat_assign(dest, key, value, depth)
-    flat_value = flatten_json(value, depth - 1)
-    if flat_value.is_a?(Hash)
-      flat_value.each do |k,v|
-        dest["#{key}.#{k}"] = v
-      end
-    else
-      dest["#{key}"] = flat_value
-    end
-    dest
-  end
 
+
+  # Returns a flattened representation of the given JSON-encodable
+  # data (that is: hashes, arrays, numbers, strings, and `nil`).
+  # Dot-separated string keys are used to encode nested hash and
+  # array structures.
+  #
+  # Hashes get flattened like so:
+  #
+  #     flatten_json({a: {b: {c: 1, d: "x"}, c: nil}})
+  #     #=> {"a.b.c" => 1, "a.b.d" => "x", "a.c" => nil}
+  #
+  # Arrays are turned into hashes like:
+  #
+  #     flatten_json([0, 1, 2, {a: "x"])
+  #     #=> {"0" => 0, "1" => 1, "2" => 2, "3.a" => "x"}
+  #
+  # Simple data (numbers, strings, nil) passes through unchanged.
+  #
   def flatten_json(json, depth = -1)
     return {} if depth == 0
 
@@ -230,23 +254,31 @@ private
       end
       flat
 
-    else # number or string
+    else # number or string or nil
       json
     end
   end
 
-  def armor(val)
-    str = val.to_s.gsub('"', '""')
-    if str.match(/[",\n]/)
-      '"' + str + '"'
+  ## Helper function to flatten_json --
+  ## Assigns a flattened value at the current key.
+  def flat_assign(dest, key, value, depth)
+    flat_value = flatten_json(value, depth - 1)
+    if flat_value.is_a?(Hash)
+      flat_value.each do |k,v|
+        dest["#{key}.#{k}"] = v
+      end
     else
-      str
+      dest["#{key}"] = flat_value
     end
+    dest
   end
 
+
+
+  ## Reads JSON data from data_fh, and writes CSV data (with header) to
+  ## output_fh.
   def output_csv(headers, data_fh, output_fh, line_ending)
-    # Write header line
-    output_fh.write(headers.map{|h| armor(h[0])}.join(","))
+    output_fh.write(headers.map{|h| csv_armor(h[0])}.join(","))
     output_fh.write(line_ending)
 
     header_count = headers.count
@@ -257,8 +289,20 @@ private
       flat.each do |key, value|
         output[headers[key]] = value if headers[key]
       end
-      output_fh.write(output.map{|x| armor(x)}.join(","))
+      output_fh.write(output.map{|x| csv_armor(x)}.join(","))
       output_fh.write(line_ending)
+    end
+  end
+
+  ## Helper function to output_csv --
+  ## Returns a CSV-armored version of `val`.
+  ## Escapes special characters and adds double-quotes if necessary.
+  def csv_armor(val)
+    str = val.to_s.gsub('"', '""')
+    if str.match(/[",\n]/)
+      '"' + str + '"'
+    else
+      str
     end
   end
 end
