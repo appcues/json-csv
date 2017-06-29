@@ -15,8 +15,8 @@ require 'optparse'
 require 'json'
 
 class JsonCsv
-  VERSION = "0.5.2"
-  VERSION_DATE = "2017-06-25"
+  VERSION = "0.5.3"
+  VERSION_DATE = "2017-06-26"
 
   DEFAULT_OPTS = {
     input_file: "-",
@@ -26,6 +26,8 @@ class JsonCsv
     debug: false,
     depth: -1,
     line_ending: "\r\n",
+    csv_delimiter: ",",
+    columns: [],
   }
 
   class << self
@@ -38,41 +40,53 @@ Converts JSON to CSV, and vice versa.
 Usage: #{$0} [options] [--] [input-file [output-file]]
         EOT
 
-        op.on("-i input-file", "--input input-file", "Input file (default STDIN)") do |input_file|
+        op.on("-i input-file", "--input input-file", "Input file (default '-', STDIN)") do |input_file|
           opts[:input_file] = input_file
         end
 
-        op.on("-o output-file", "--output output-file", "Output file (default STDOUT)") do |output_file|
+        op.on("-o output-file", "--output output-file", "Output file (default '-', STDOUT)") do |output_file|
           opts[:output_file] = output_file
         end
 
-        op.on("-s json|csv", "--source-encoding json|csv", "Encoding of input file (default json)") do |source|
-          opts[:source_encoding] = source
+        op.on("-s json|csv", "--source-encoding json|csv", "Encoding of input file (default 'json')") do |source|
+          opts[:source_encoding] = source.downcase
         end
 
         op.on("-d depth", "--depth depth", "Maximum depth of JSON-to-CSV conversion (default -1, unlimited)") do |depth|
           opts[:depth] = depth.to_i
         end
 
-        op.on("-e crlf|cr|lf", "--line-ending crlf|cr|lf", "Line endings for output file (default crlf).") do |ending|
-          opts[:line_ending] = {"crlf" => "\r\n", "cr" => "\r", "lf" => "\n"}[ending]
+        op.on("-c column1,column2,...", "--columns column1,column2,...", "Don't scan JSON input for CSV columns; use these instead. Subsequent use of this option adds to the list of columns") do |columns|
+          columns.split(",").each{|c| opts[:columns].push(c)}
+        end
+
+        op.on("-T tmpdir", "--tmpdir tmpdir", "Temporary directory (default $TMPDIR or '/tmp')") do |tmpdir|
+          opts[:tmpdir] = tmpdir
+        end
+
+        op.on("-c delimiter", "--csv-delimiter delimiter", "Delimiter for CSV fields (default ',')") do |delimiter|
+          opts[:csv_delimiter] = delimiter.gsub('\t', "\t")
+        end
+
+        op.on("-e crlf|cr|lf", "--line-ending crlf|cr|lf", "Line endings for output file (default 'crlf').") do |ending|
+          opts[:line_ending] = {"crlf" => "\r\n", "cr" => "\r", "lf" => "\n"}[ending.downcase]
           if !opts[:line_ending]
             STDERR.puts "Invalid line ending '#{ending}'.  Valid choices: crlf cr lf"
             exit 1
           end
         end
 
-        op.on_tail("--debug", "Turn debugging messages on") do
+        op.on("--debug", "Turn debugging messages on") do
           opts[:debug] = true
         end
 
-        op.on_tail("--version", "Print version info and exit") do
+        op.on("--version", "Print version info and exit") do
           puts "json-csv version #{VERSION} (#{VERSION_DATE})"
           puts "https://github.com/appcues/json-csv"
           exit
         end
 
-        op.on_tail("-h", "--help", "Show this message and exit") do
+        op.on("-h", "--help", "Show this message and exit") do
           puts op.to_s
           exit
         end
@@ -124,33 +138,47 @@ Usage: #{$0} [options] [--] [input-file [output-file]]
   def convert_json_to_csv(opts = {})
     opts = @opts.merge(opts)
 
-    ## First pass -- create CSV headers from JSON input
+    ## First pass -- Create CSV headers
     input_fh = nil
     tmp_fh = nil
+    data_fh = nil
     tmp_filename = nil
     data_filename = nil
+    headers = {}
+
+    depth = opts[:depth]
+    depth += 1 if depth > 0  # a fudge, in order to use -1 as infinity
 
     if opts[:input_file] == "-"
-      input_fh = STDIN
-      data_filename = tmp_filename = "#{opts[:tmpdir]}/json-csv-#{$$}.tmp"
-      debug(opts, "STDIN will be written to #{tmp_filename}.")
-      tmp_fh = File.open(data_filename, "w")
+      if opts[:columns].count == 0
+        # Scan input for headers
+        input_fh = STDIN
+        data_filename = tmp_filename = "#{opts[:tmpdir]}/json-csv-#{$$}.tmp"
+        debug(opts, "STDIN will be written to #{tmp_filename}.")
+        tmp_fh = File.open(data_filename, "w")
+      else
+        data_fh = STDIN
+      end
     else
       input_fh = File.open(opts[:input_file], "r")
       data_filename = opts[:input_file]
     end
 
-    debug(opts, "Getting headers from JSON data.")
-    depth = opts[:depth]
-    depth += 1 if depth > 0  # a fudge, in order to use -1 as infinity
-    headers = get_headers_from_json(input_fh, tmp_fh, depth)
-
-    input_fh.close
-    tmp_fh.close if tmp_fh
+    begin
+      if opts[:columns].count > 0
+        opts[:columns].each_with_index{|c,i| headers[c]=i}
+      else
+        debug(opts, "Getting headers from JSON data.")
+        headers = get_headers_from_json(input_fh, tmp_fh, depth)
+      end
+    ensure
+      input_fh.close if input_fh
+      tmp_fh.close if tmp_fh
+    end
 
 
     ## Second pass -- write CSV data from JSON input
-    data_fh = File.open(data_filename, "r")
+    data_fh ||= File.open(data_filename, "r")
     output_fh = nil
 
     if opts[:output_file] == "-"
@@ -159,17 +187,20 @@ Usage: #{$0} [options] [--] [input-file [output-file]]
       output_fh = File.open(opts[:output_file], "w")
     end
 
-    debug(opts, "Writing CSV output.")
-    output_csv(headers, data_fh, output_fh, opts[:line_ending])
-    data_fh.close
-    output_fh.close
-
-    debug(opts, "Removing #{tmp_filename}.")
-    File.unlink(tmp_filename) if tmp_filename
+    begin
+      debug(opts, "Writing CSV output.")
+      output_csv(headers, data_fh, output_fh, opts[:line_ending], opts[:csv_delimiter])
+    ensure
+      data_fh.close
+      output_fh.close
+      File.unlink(tmp_filename) if tmp_filename
+      debug(opts, "Removed #{tmp_filename}.") if tmp_filename
+    end
   end
 
   def convert_csv_to_json(opts = {})
-    raise NotImplementedError
+    STDERR.puts "CSV-to-JSON conversion is not yet implemented."
+    exit 99
   end
 
 
@@ -277,8 +308,8 @@ private
 
   ## Reads JSON data from data_fh, and writes CSV data (with header) to
   ## output_fh.
-  def output_csv(headers, data_fh, output_fh, line_ending)
-    output_fh.write(headers.map{|h| csv_armor(h[0])}.join(","))
+  def output_csv(headers, data_fh, output_fh, line_ending, delimiter)
+    output_fh.write(headers.map{|h| csv_armor(h[0], delimiter)}.join(delimiter))
     output_fh.write(line_ending)
 
     header_count = headers.count
@@ -289,7 +320,7 @@ private
       flat.each do |key, value|
         output[headers[key]] = value if headers[key]
       end
-      output_fh.write(output.map{|x| csv_armor(x)}.join(","))
+      output_fh.write(output.map{|x| csv_armor(x, delimiter)}.join(delimiter))
       output_fh.write(line_ending)
     end
   end
@@ -297,9 +328,9 @@ private
   ## Helper function to output_csv --
   ## Returns a CSV-armored version of `val`.
   ## Escapes special characters and adds double-quotes if necessary.
-  def csv_armor(val)
+  def csv_armor(val, delimiter)
     str = val.to_s.gsub('"', '""')
-    if str.match(/[",\n]/)
+    if str.index('"') || str.index("\n") || str.index(delimiter)
       '"' + str + '"'
     else
       str
