@@ -15,8 +15,8 @@ require 'optparse'
 require 'json'
 
 class JsonCsv
-  VERSION = "0.5.3"
-  VERSION_DATE = "2017-06-26"
+  VERSION = "0.6.0"
+  VERSION_DATE = "2017-06-29"
 
   DEFAULT_OPTS = {
     input_file: "-",
@@ -28,6 +28,8 @@ class JsonCsv
     line_ending: "\r\n",
     csv_delimiter: ",",
     columns: [],
+    first_columns: [],
+    exclude_columns: [],
   }
 
   class << self
@@ -58,6 +60,14 @@ Usage: #{$0} [options] [--] [input-file [output-file]]
 
         op.on("-c column1,column2,...", "--columns column1,column2,...", "Don't scan JSON input for CSV columns; use these instead. Subsequent use of this option adds to the list of columns") do |columns|
           columns.split(",").each{|c| opts[:columns].push(c)}
+        end
+
+        op.on("-f column1,column2,...", "--first-columns column1,column2,...", "Columns to appear first (leftmost) in CSV output") do |columns|
+          columns.split(",").each{|c| opts[:first_columns].push(c)}
+        end
+
+        op.on("-X column1,column2,...", "--exclude-columns column1,column2,...", "Columns to exclude from CSV output") do |columns|
+          columns.split(",").each{|c| opts[:exclude_columns].push(c)}
         end
 
         op.on("-T tmpdir", "--tmpdir tmpdir", "Temporary directory (default $TMPDIR or '/tmp')") do |tmpdir|
@@ -169,7 +179,7 @@ Usage: #{$0} [options] [--] [input-file [output-file]]
         opts[:columns].each_with_index{|c,i| headers[c]=i}
       else
         debug(opts, "Getting headers from JSON data.")
-        headers = get_headers_from_json(input_fh, tmp_fh, depth)
+        headers = get_headers_from_json(input_fh, tmp_fh, depth, opts[:first_columns], opts[:exclude_columns])
       end
     ensure
       input_fh.close if input_fh
@@ -215,7 +225,7 @@ private
   # Scans a JSON file at `input_fh` to determine the headers
   # to use when writing CSV data.
   # Returns a hash of `'header' => index` pairs, sorted.
-  def get_headers_from_json(input_fh, tmp_fh, depth)
+  def get_headers_from_json(input_fh, tmp_fh, depth, first_columns, exclude_columns)
     headers = {}
     input_fh.each_line do |input|
       tmp_fh.puts(input) if tmp_fh
@@ -224,23 +234,34 @@ private
         headers[key] = true
       end
     end
-    sort_keys(headers)
+    exclude_columns.each {|col| headers.delete(col)}
+    sort_keys(headers, first_columns)
   end
 
   # Helper function to get_headers_from_json --
   # Sorts a hash with string keys by number of dots in the string,
   # then alphabetically.
   # Returns a hash of `'key' => index` pairs, in order of index.
-  def sort_keys(hash)
+  def sort_keys(hash, first_columns = [])
+    first_columns_hash = Hash.new(2**32)
+    first_columns.each_with_index {|col, i| first_columns_hash[col] = i}
+
+    sorted_keys = hash.keys.sort {|a,b| key_sort_fn(a, b, first_columns_hash)}
+
     sorted = {}
-    sorted_keys = hash.keys.sort do |a, b|
-      x = (count_dots(a) <=> count_dots(b))
-      x == 0 ? (a<=>b) : x
-    end
-    sorted_keys.each_with_index do |key, i|
-      sorted[key] = i
-    end
+    sorted_keys.each_with_index {|key, i| sorted[key] = i}
+
     sorted
+  end
+
+  def key_sort_fn(a, b, first_columns_hash)
+    x = (first_columns_hash[a] <=> first_columns_hash[b])
+    return x unless x==0
+
+    x = (count_dots(a) <=> count_dots(b))
+    return x unless x==0
+
+    a <=> b
   end
 
   # Helper function to sort_keys --
